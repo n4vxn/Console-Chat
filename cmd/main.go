@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/n4vxn/Console-Chat/internal/db"
 	"github.com/n4vxn/Console-Chat/internal/kafkaserver"
 	"github.com/n4vxn/Console-Chat/internal/websocket"
 )
@@ -26,6 +27,8 @@ func main() {
 	}
 	defer consumer.Close()
 
+	db.ConnectDB()
+	
 	wsServer := websocket.NewWebSocketServer(producer, consumer)
 
 	http.HandleFunc("/ws", wsServer.HandleWebSocketConnections)

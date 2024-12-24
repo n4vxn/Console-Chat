@@ -4,25 +4,23 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
+
 	"github.com/IBM/sarama"
 	"github.com/gorilla/websocket"
 	"github.com/n4vxn/Console-Chat/internal/kafkaserver"
 )
 
-type WebSocketServer struct {
-	clients        map[*websocket.Conn]bool
-	kafkaProducer  sarama.SyncProducer
-	kafkaConsumer  sarama.Consumer
-	broadcastChan  chan []byte
+type ClientInfo struct {
+	Username string
 }
 
-func NewWebSocketServer(kafkaProducer sarama.SyncProducer, kafkaConsumer sarama.Consumer) *WebSocketServer {
-	return &WebSocketServer{
-		clients:       make(map[*websocket.Conn]bool),
-		kafkaProducer: kafkaProducer,
-		kafkaConsumer: kafkaConsumer,
-		broadcastChan: make(chan []byte),
-	}
+type WebSocketServer struct {
+	clients       map[*websocket.Conn]bool
+	clientMutex   sync.Mutex // Protects the clients map
+	clientInfo    ClientInfo
+	kafkaProducer sarama.SyncProducer
+	kafkaConsumer sarama.Consumer
 }
 
 func StartProducer(kafkaConfig *kafkaserver.KafkaConfig) (sarama.SyncProducer, error) {
@@ -41,6 +39,53 @@ func StartConsumer(kafkaConfig *kafkaserver.KafkaConfig) (sarama.Consumer, error
 	return consumer, nil
 }
 
+func NewWebSocketServer(kafkaProducer sarama.SyncProducer, kafkaConsumer sarama.Consumer) *WebSocketServer {
+	return &WebSocketServer{
+		clients:       make(map[*websocket.Conn]bool),
+		kafkaProducer: kafkaProducer,
+		kafkaConsumer: kafkaConsumer,
+	}
+}
+
+func (ws *WebSocketServer) AddUsers(conn *websocket.Conn) {
+	ws.clientMutex.Lock()
+	ws.clients[conn] = true
+	ws.clientMutex.Unlock()
+	// defer func() {
+	// 	ws.clientMutex.Lock()
+	// 	delete(ws.clients, conn)
+	// 	ws.clientMutex.Unlock()
+	// 	conn.Close()
+	// 	log.Printf("%s disconnected", conn.RemoteAddr().String())
+	// }()
+
+	log.Printf("%s connected", conn.RemoteAddr().String())
+}
+
+func (ws *WebSocketServer) RemoveUsers(conn *websocket.Conn) {
+	defer func() {
+		ws.clientMutex.Lock()
+		delete(ws.clients, conn)
+		ws.clientMutex.Unlock()
+		conn.Close()
+		log.Printf("%s disconnected", conn.RemoteAddr().String())
+	}()
+}
+
+func (ws *WebSocketServer) broadcastMessage(message string) {
+	ws.clientMutex.Lock()
+	defer ws.clientMutex.Unlock()
+
+	for client := range ws.clients {
+		err := client.WriteMessage(websocket.TextMessage, []byte(message))
+		if err != nil {
+			log.Printf("Error sending message to client: %v", err)
+			client.Close()
+			delete(ws.clients, client)
+		}
+	}
+}
+
 func (ws *WebSocketServer) HandleWebSocketConnections(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -53,10 +98,9 @@ func (ws *WebSocketServer) HandleWebSocketConnections(w http.ResponseWriter, r *
 		log.Printf("WebSocket upgrade error: %v", err)
 		return
 	}
-	defer conn.Close()
 
-	ws.clients[conn] = true
-	defer delete(ws.clients, conn)
+	ws.AddUsers(conn)
+	defer ws.RemoveUsers(conn)
 
 	go func() {
 		partitionConsumer, err := ws.kafkaConsumer.ConsumePartition("chat-messages", 0, sarama.OffsetNewest)
@@ -65,17 +109,10 @@ func (ws *WebSocketServer) HandleWebSocketConnections(w http.ResponseWriter, r *
 			return
 		}
 		defer partitionConsumer.Close()
-
+		ws.clientInfo.Username = "naveen"
 		for msg := range partitionConsumer.Messages() {
-			message := fmt.Sprintf("Kafka Message: %s", string(msg.Value))
-			for client := range ws.clients {
-				err := client.WriteMessage(websocket.TextMessage, []byte(message))
-				if err != nil {
-					log.Printf("Error sending message to client: %v", err)
-					client.Close()
-					delete(ws.clients, client)
-				}
-			}
+			message := fmt.Sprintf("%s: %s", ws.clientInfo.Username, string(msg.Value))
+			ws.broadcastMessage(message)
 		}
 	}()
 
