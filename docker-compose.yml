@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   zookeeper:
@@ -36,13 +36,19 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
-      - app-network
+      - mynetwork
+
+  redis:
+    image: redis:latest
+    container_name: redis-chat
+    ports:
+      - "6379:6379"
+    networks:
+      - mynetwork
 
 volumes:
   pgdata:
 
 networks:
   mynetwork:
-    driver: bridge
-  app-network:
     driver: bridge

@@ -9,7 +9,7 @@ import (
 
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
-	"github.com/n4vxn/FileMove/types"
+	"github.com/n4vxn/Console-Chat/types"
 )
 
 var db *sql.DB
@@ -40,29 +40,11 @@ func ConnectDB() error {
 	return nil
 }
 
-func SaveUploadMetadata(metadata *types.UploadMetadata) error {
-	query := `INSERT INTO upload_metadata (filename, file_size, checksum, action, uploaded_at) 
-			  VALUES ($1, $2, $3, $4, NOW()) RETURNING id`
-	var id int
-	err := db.QueryRow(query, metadata.Name, metadata.FileSize, metadata.Checksum, metadata.Action).Scan(&id)
-	if err != nil {
-		return err
-	}
-	return nil
-}
 
-func SaveDownloadMetadata(metadata *types.DownloadMetadata) error {
-	query := `INSERT INTO download_metadata (filename, file_size, checksum, action, uploaded_at) 
-			  VALUES ($1, $2, $3, $4, NOW()) RETURNING id`
-	var id int
-	err := db.QueryRow(query, metadata.Name, metadata.FileSize, metadata.Checksum, metadata.Action).Scan(&id)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func SaveUsers(user *types.User) error {
+func SaveUsers(user *types.Users) error {
+	if db == nil {
+        return fmt.Errorf("database connection is not initialized")
+    }
 	query := `INSERT INTO users (username, password, created_at, updated_at) 
 			  VALUES ($1, $2, NOW(), NOW()) RETURNING id`
 	var id int

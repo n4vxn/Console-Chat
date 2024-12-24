@@ -9,6 +9,7 @@ import (
 	"github.com/IBM/sarama"
 	"github.com/gorilla/websocket"
 	"github.com/n4vxn/Console-Chat/internal/kafkaserver"
+	"github.com/n4vxn/Console-Chat/internal/redis"
 )
 
 type ClientInfo struct {
@@ -16,9 +17,8 @@ type ClientInfo struct {
 }
 
 type WebSocketServer struct {
-	clients       map[*websocket.Conn]bool
-	clientMutex   sync.Mutex // Protects the clients map
-	clientInfo    ClientInfo
+	clients       map[*websocket.Conn]ClientInfo // Track client info
+	clientMutex   sync.Mutex                    // Protects the clients map
 	kafkaProducer sarama.SyncProducer
 	kafkaConsumer sarama.Consumer
 }
@@ -41,35 +41,37 @@ func StartConsumer(kafkaConfig *kafkaserver.KafkaConfig) (sarama.Consumer, error
 
 func NewWebSocketServer(kafkaProducer sarama.SyncProducer, kafkaConsumer sarama.Consumer) *WebSocketServer {
 	return &WebSocketServer{
-		clients:       make(map[*websocket.Conn]bool),
+		clients:       make(map[*websocket.Conn]ClientInfo),
 		kafkaProducer: kafkaProducer,
 		kafkaConsumer: kafkaConsumer,
 	}
 }
 
-func (ws *WebSocketServer) AddUsers(conn *websocket.Conn) {
+func (ws *WebSocketServer) AddUsers(conn *websocket.Conn, username string) {
 	ws.clientMutex.Lock()
-	ws.clients[conn] = true
+	ws.clients[conn] = ClientInfo{Username: username}
 	ws.clientMutex.Unlock()
-	// defer func() {
-	// 	ws.clientMutex.Lock()
-	// 	delete(ws.clients, conn)
-	// 	ws.clientMutex.Unlock()
-	// 	conn.Close()
-	// 	log.Printf("%s disconnected", conn.RemoteAddr().String())
-	// }()
 
-	log.Printf("%s connected", conn.RemoteAddr().String())
+	clientConnected := fmt.Sprintf("%s connected as %s", conn.RemoteAddr().String(), username)
+	redis.PubUserEvent("user-events", clientConnected)
+	log.Println(clientConnected)
 }
 
 func (ws *WebSocketServer) RemoveUsers(conn *websocket.Conn) {
-	defer func() {
-		ws.clientMutex.Lock()
+	ws.clientMutex.Lock()
+	clientInfo, exists := ws.clients[conn]
+	if exists {
 		delete(ws.clients, conn)
-		ws.clientMutex.Unlock()
-		conn.Close()
-		log.Printf("%s disconnected", conn.RemoteAddr().String())
-	}()
+	}
+	ws.clientMutex.Unlock()
+
+	if exists {
+		clientDisconnected := fmt.Sprintf("%s: disconnected", clientInfo.Username)
+		redis.PubUserEvent("user-events", clientDisconnected)
+		log.Println(clientDisconnected)
+	}
+
+	conn.Close()
 }
 
 func (ws *WebSocketServer) broadcastMessage(message string) {
@@ -79,7 +81,7 @@ func (ws *WebSocketServer) broadcastMessage(message string) {
 	for client := range ws.clients {
 		err := client.WriteMessage(websocket.TextMessage, []byte(message))
 		if err != nil {
-			log.Printf("Error sending message to client: %v", err)
+			log.Printf("Error sending message to client %v: %v", client.RemoteAddr(), err)
 			client.Close()
 			delete(ws.clients, client)
 		}
@@ -99,7 +101,12 @@ func (ws *WebSocketServer) HandleWebSocketConnections(w http.ResponseWriter, r *
 		return
 	}
 
-	ws.AddUsers(conn)
+	username := r.URL.Query().Get("username")
+	if username == "" {
+		username = "guest" // Default username if not provided
+	}
+
+	ws.AddUsers(conn, username)
 	defer ws.RemoveUsers(conn)
 
 	go func() {
@@ -109,9 +116,9 @@ func (ws *WebSocketServer) HandleWebSocketConnections(w http.ResponseWriter, r *
 			return
 		}
 		defer partitionConsumer.Close()
-		ws.clientInfo.Username = "naveen"
+
 		for msg := range partitionConsumer.Messages() {
-			message := fmt.Sprintf("%s: %s", ws.clientInfo.Username, string(msg.Value))
+			message := fmt.Sprintf("%s: %s", username, string(msg.Value)) // Adjust to your actual Kafka message format
 			ws.broadcastMessage(message)
 		}
 	}()
@@ -134,3 +141,4 @@ func (ws *WebSocketServer) HandleWebSocketConnections(w http.ResponseWriter, r *
 		}
 	}
 }
+
